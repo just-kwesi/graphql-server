@@ -1,12 +1,26 @@
 const { ApolloServer } = require('@apollo/server');
-const { startStandaloneServer } = require('@apollo/server/standalone');
-const { v1: uuid } = require('uuid');
-const { GraphQLError } = require('graphql');
-const mongoose = require('mongoose');
-mongoose.set('strictQuery', false);
-const Person = require('./models/person');
+const { expressMiddleware } = require('@apollo/server/express4');
+const {
+  ApolloServerPluginDrainHttpServer,
+} = require('@apollo/server/plugin/drainHttpServer');
+const { makeExecutableSchema } = require('@graphql-tools/schema');
+const express = require('express');
+const cors = require('cors');
+const http = require('http');
+
+const jwt = require('jsonwebtoken');
 
 require('dotenv').config();
+
+const { WebSocketServer } = require('ws');
+const { useServer } = require('graphql-ws/lib/use/ws');
+
+const mongoose = require('mongoose');
+
+const User = require('./models/user');
+
+const typeDefs = require('./schema');
+const resolvers = require('./resolvers');
 
 const MONGODB_URI = process.env.MONGODB_URI;
 
@@ -21,130 +35,62 @@ mongoose
     console.log('error connection to MongoDB:', error.message);
   });
 
-let persons = [
-  {
-    name: 'Arto Hellas',
-    phone: '040-123543',
-    street: 'Tapiolankatu 5 A',
-    city: 'Espoo',
-    id: '3d594650-3436-11e9-bc57-8b80ba54c431',
-  },
-  {
-    name: 'Matti Luukkainen',
-    phone: '040-432342',
-    street: 'Malminkaari 10 A',
-    city: 'Helsinki',
-    id: '3d599470-3436-11e9-bc57-8b80ba54c431',
-  },
-  {
-    name: 'Venla Ruuska',
-    street: 'Nallemäentie 22 C',
-    city: 'Helsinki',
-    id: '3d599471-3436-11e9-bc57-8b80ba54c431',
-  },
-];
+// setup is now within a function
+const start = async () => {
+  const app = express();
+  const httpServer = http.createServer(app);
 
-const typeDefs = `
-  type Address {
-    street: String!
-    city: String!
-  }
+  const wsServer = new WebSocketServer({
+    server: httpServer,
+    path: '/',
+  });
+  const schema = makeExecutableSchema({ typeDefs, resolvers });
+  const serverCleanup = useServer({ schema }, wsServer);
 
-  type Person {
-    name: String!
-    phone: String
-    address: Address!
-    id: ID!
-  }
-  enum YesNo {
-    YES
-    NO
-  }
+  const server = new ApolloServer({
+    schema,
+    plugins: [
+      ApolloServerPluginDrainHttpServer({ httpServer }),
+      {
+        async serverWillStart() {
+          return {
+            async drainServer() {
+              await serverCleanup.dispose();
+            },
+          };
+        },
+      },
+    ],
+  });
 
-  type Query {
-    personCount: Int!
-    allPersons(phone: YesNo): [Person!]!
-    findPerson(name: String!): Person
-  }
+  await server.start();
 
-  type Mutation {
-    addPerson(
-      name: String!
-      phone: String
-      street: String!
-      city: String!
-    ): Person
+  app.use(
+    '/',
+    cors(),
+    express.json(),
+    expressMiddleware(server, {
+      context: async ({ req }) => {
+        const auth = req ? req.headers.authorization : null;
+        if (auth && auth.startsWith('Bearer ')) {
+          const decodedToken = jwt.verify(
+            auth.substring(7),
+            process.env.JWT_SECRET
+          );
+          const currentUser = await User.findById(decodedToken.id).populate(
+            'friends'
+          );
+          return { currentUser };
+        }
+      },
+    })
+  );
 
-    editNumber(name: String!, phone: String!): Person
-  }
-`;
+  const PORT = 4000;
 
-const resolvers = {
-  Query: {
-    personCount: async () => Person.collection.countDocuments(),
-    allPersons: async (root, args) => {
-      if (!args.phone) {
-        return Person.find({});
-      }
-
-      return Person.find({ phone: { $exists: args.phone === 'YES' } });
-    },
-    findPerson: async (root, args) => Person.findOne({ name: args.name }),
-  },
-  Person: {
-    address: (root) => {
-      return {
-        street: root.street,
-        city: root.city,
-      };
-    },
-  },
-  Mutation: {
-    addPerson: async (root, args) => {
-      const person = new Person({ ...args });
-
-      try {
-        await person.save();
-      } catch (error) {
-        throw new GraphQLError('Saving person failed', {
-          extensions: {
-            code: 'BAD_USER_INPUT',
-            invalidArgs: args.name,
-            error,
-          },
-        });
-      }
-
-      return person;
-    },
-    editNumber: async (root, args) => {
-      const person = await Person.findOne({ name: args.name });
-      person.phone = args.phone;
-
-      try {
-        await person.save();
-      } catch (error) {
-        throw new GraphQLError('Saving number failed', {
-          extensions: {
-            code: 'BAD_USER_INPUT',
-            invalidArgs: args.name,
-            error,
-          },
-        });
-      }
-
-      return person;
-    },
-  },
+  httpServer.listen(PORT, () =>
+    console.log(`Server is now running on http://localhost:${PORT}`)
+  );
 };
 
-const server = new ApolloServer({
-  typeDefs,
-  resolvers,
-});
-
-startStandaloneServer(server, {
-  listen: { port: 4000 },
-}).then(({ url }) => {
-  console.log(`server ready at ${url}`);
-});
+start();
