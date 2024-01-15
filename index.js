@@ -29,7 +29,7 @@ let persons = [
 const typeDefs = `
   type Address {
     street: String!
-    city: String! 
+    city: String!
   }
 
   type Person {
@@ -45,7 +45,7 @@ const typeDefs = `
 
   type Query {
     personCount: Int!
-    allPersons(phone:YesNo): [Person!]!
+    allPersons(phone: YesNo): [Person!]!
     findPerson(name: String!): Person
   }
 
@@ -57,10 +57,7 @@ const typeDefs = `
       city: String!
     ): Person
 
-    editNumber(
-      name: String!
-      phone: String!
-    ): Person
+    editNumber(name: String!, phone: String!): Person
   }
 `;
 
